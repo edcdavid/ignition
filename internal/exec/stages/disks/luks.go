@@ -107,7 +107,7 @@ func (s *stage) createLuks(config types.Config) error {
 	}
 
 	s.State.LuksPersistKeyFiles = make(map[string]string)
-
+	luksToDisk := []types.Luks{}
 	for _, luks := range config.Storage.Luks {
 		// TODO: allow Ignition generated KeyFiles for
 		// non-clevis devices that can be persisted.
@@ -266,7 +266,7 @@ func (s *stage) createLuks(config types.Config) error {
 			var pin string
 			var config string
 
-			if util.NotEmpty(luks.Clevis.Custom.Pin) {
+			if luks.WriteToDisk == nil || (luks.WriteToDisk != nil && *luks.WriteToDisk == false) && util.NotEmpty(luks.Clevis.Custom.Pin) {
 				pin = *luks.Clevis.Custom.Pin
 				config = *luks.Clevis.Custom.Config
 			} else {
@@ -326,12 +326,19 @@ func (s *stage) createLuks(config types.Config) error {
 				}
 			}
 
-			// lets bind our device
-			if _, err := s.Logger.LogCmd(
-				exec.Command(distro.ClevisCmd(), "luks", "bind", "-f", "-k", keyFilePath, "-d", devAlias, pin, config), "Clevis bind",
-			); err != nil {
-				return fmt.Errorf("binding clevis device: %v", err)
+			if luks.WriteToDisk != nil && *luks.WriteToDisk == false {
+				// lets bind our device
+				if _, err := s.Logger.LogCmd(
+					exec.Command(distro.ClevisCmd(), "luks", "bind", "-f", "-k", keyFilePath, "-d", devAlias, pin, config), "Clevis bind",
+				); err != nil {
+					return fmt.Errorf("binding clevis device: %v", err)
+				}
+			} else {
+				luksToDisk = append(luksToDisk, luks)
 			}
+
+			// only bind device if
+
 			intTpm2 := 0
 			if util.IsTrue(luks.Clevis.Tpm2) {
 				intTpm2 = 1
@@ -368,6 +375,30 @@ func (s *stage) createLuks(config types.Config) error {
 			}
 			delete(s.State.LuksPersistKeyFiles, luks.Name)
 		}
+	}
+
+	jsonData, err := json.Marshal(luksToDisk)
+	if err != nil {
+		return fmt.Errorf("error marshalling luks device to be written on disk: %v", err)
+	}
+
+	err = writeToFile("/etc/luksconfig", jsonData)
+	if err != nil {
+		return fmt.Errorf("error writing luks device to be written on disk: %v", err)
+	}
+	return nil
+}
+
+func writeToFile(filename string, data []byte) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = file.Write(data)
+	if err != nil {
+		return err
 	}
 
 	return nil
